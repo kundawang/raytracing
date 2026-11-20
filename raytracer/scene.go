@@ -136,6 +136,8 @@ func (scene *Scene) computeLighting(point Vector, normal Vector, toCamera Vector
 	for _, light := range scene.lights {
 		if light.lightType == Ambient {
 			intensity = intensity.Add(light.intensity)
+		} else if light.lightType == Area {
+			intensity = intensity.Add(scene.computeAreaLighting(light, point, normal, toCamera, specularity))
 		} else {
 			var lightVector Vector
 			if light.lightType == Point {
@@ -170,4 +172,56 @@ func (scene *Scene) computeLighting(point Vector, normal Vector, toCamera Vector
 		}
 	}
 	return intensity
+}
+
+// computeAreaLighting estimates direct illumination from a rectangular area
+// light by averaging the contribution of its precomputed sample points. Each
+// visible sample contributes like a point light; occluded samples contribute
+// nothing, which produces soft penumbrae. Accumulation is uncapped so very
+// bright lights average correctly - the result is clamped by Colour.Add at
+// the call site.
+func (scene *Scene) computeAreaLighting(light Light, point Vector, normal Vector, toCamera Vector, specularity float64) Colour {
+	// the back face of the light emits nothing
+	if len(light.samples) == 0 || point.Minus(light.position).DotProduct(light.normal) <= 0 {
+		return Colour{}
+	}
+
+	var sum Colour
+	for _, offset := range light.samples {
+		lightVector := light.position.Add(offset).Minus(point)
+		if lightVector.Length() < 0.000001 {
+			// shading point sits on the light itself - skip to avoid NaN
+			continue
+		}
+
+		// Shadow check - is anything blocking this sample?
+		shadowObject, _ := scene.findClosestIntersection(point, lightVector, 0.000001, 1)
+		if shadowObject != nil {
+			continue
+		}
+
+		//# Diffuse
+		nl := normal.DotProduct(lightVector)
+		if nl > 0 {
+			chanIntensity := nl / (normal.Length() * lightVector.Length())
+			sum.R += light.intensity.R * chanIntensity
+			sum.G += light.intensity.G * chanIntensity
+			sum.B += light.intensity.B * chanIntensity
+		}
+
+		// Specular
+		if specularity > 0 {
+			reflection := reflectRay(lightVector, normal)
+			rv := reflection.DotProduct(toCamera)
+			if rv > 0 {
+				s := math.Pow(rv/(reflection.Length()*toCamera.Length()), specularity)
+				sum.R += light.intensity.R * s
+				sum.G += light.intensity.G * s
+				sum.B += light.intensity.B * s
+			}
+		}
+	}
+
+	n := float64(len(light.samples))
+	return Colour{R: sum.R / n, G: sum.G / n, B: sum.B / n}
 }
